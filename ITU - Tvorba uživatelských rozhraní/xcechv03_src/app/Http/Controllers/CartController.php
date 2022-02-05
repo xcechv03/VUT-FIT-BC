@@ -1,7 +1,6 @@
 <?php
 // CartController.php
 //
-// autor: Vojtěch Orava (xorava02)
 //
 
 
