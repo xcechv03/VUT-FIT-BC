@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+import socket
+import sys
+import getopt
+import os
+
+
+def Download(fs, IPport, server):
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((IPport[0], int(IPport[1])))
+
+    s.sendall(("GET " + fs[2] + " FSP/1.0\r\n" + "Hostname: " + server +"\r\nAgent: xcechv03\r\n\r\n").encode())
+    vysledok = s.recv(4096)
+
+    checker = vysledok.decode("utf-8")
+
+    if checker[8] == "N":
+        sys.exit("Not Found")
+    if checker[9] == "e":
+        sys.exit("Server Error")
+
+
+    file = fs[2].split('/')
+    file.reverse()
+    with open(os.path.join("./", file[0]), 'wb') as newFile:
+        while True:
+            Data = s.recv(4096)
+            if not Data:
+                break
+            newFile.write(Data)
+        newFile.close()
+
+    s.close()
+
+
+try:
+    opts, args = getopt.getopt(sys.argv[1:], "n:f:")
+except getopt.GetoptError as err:
+    sys.exit("Wrong arguments")
+for o, a in opts:
+    if o == "-n":
+        nameServer = a
+        port = a.split(":")
+    elif o == "-f":
+        surl = a
+        a = a.replace("//", "/")
+        fs = a.split("/", 2)
+        if fs[0] != "fsp:":
+            sys.exit("Nejedna sa o fsp pripojenie")
+    else:
+        sys.exit("Wrong arguments")
+
+
+
+
+#UDP
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+udp.connect((port[0], int(port[1])))
+udp.send(("WHEREIS " + fs[1]).encode())
+result = udp.recv(4096)
+
+check = result.decode("utf-8")
+
+if check == "ERR Syntax":
+    sys.exit("ERR Syntax")
+elif check == "ERR Not Found":
+    sys.exit("ERR Not Found")
+
+
+udp.close()
+
+splittedres = result.decode("utf-8").split()
+
+
+IPport = splittedres[1].split(":")
+
+
+
+#TCP
+
+
+files = fs[2].split('/')
+
+files.reverse()
+
+if files[0] == '*':
+
+    # stiahni index
+    fs[2] = "index"
+    Download(fs, IPport, fs[1])
+
+    #otvor index a stahuj postupne subory
+    i = open("index", "r")
+    f = i.readlines()
+    for file in f:
+        fs[2] = file.replace('\n', '')
+        Download(fs, IPport, fs[1])
+else:
+    Download(fs, IPport, fs[1])
+
+
