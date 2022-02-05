@@ -1,7 +1,6 @@
 <?php
 // ItemController.php
 //
-// autor: Vojtěch Orava (xorava02)
 //
 
 
