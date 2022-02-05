@@ -1,0 +1,436 @@
+#!/bin/bash
+
+POSIXLY_CORRECT=yes
+i=0
+repeat=0
+integer='^[0-9]+$'
+datetime_after=0
+datetime_before=0
+declare -A logs
+width=0
+
+
+# get filter
+while getopts ":t: :a: :b: :w: h -help" opt; do
+	case ${opt} in
+		h | -help )
+			echo "Usage: tradelog [-h|--help] [FILTR] [PŘÍKAZ] [LOG [LOG2 [...]]" 
+			exit 0
+			;;
+		a )
+			datetime_after=$(date --date="$OPTARG" +%s)
+			;;
+		b )
+			datetime_before=$(date --date="$OPTARG" +%s)
+			;;
+		t )
+			tickers[i]=$OPTARG
+			;;	
+		w )
+			if [[ $repeat == 1 ]]; then
+				echo "Error: repeated option -w"
+				exit 1
+			fi
+			width=$OPTARG
+			if ! [[ $width =~ $integer || $width -lt 0 ]]; then
+				echo "Error: width must be an integer grater than 0"
+			fi
+			repeat=1
+			;;
+		\? )
+			echo "Error: invalid option -$OPTARG" 1>&2
+			exit 1
+			;;
+		: )
+			echo "Error: invalid option -$OPTARG requires argument" 1>&2
+			exit 1
+			;;
+	esac
+	i=$(($i+1))
+done
+shift $((OPTIND -1))
+
+# get command
+case $1 in
+	"list-tick" | "profit" | "pos" | "last-price" | "hist-ord" | "graph-pos" )
+		command=$1
+		;;
+	* )
+		command="none"
+		;;
+esac
+
+
+# get log files
+i=0
+for arg in "$@"; do
+	
+	# check if argument is file, exists and is readable
+	if [[ -f $arg && -r $arg && -e $arg ]]; then
+		
+		#skip duplicate files
+		if ! [[ i -gt 0 && -e ${files[i-1]} && $arg -ef ${files[i-1]} ]]; then
+			files[i]=$arg
+		fi
+		
+		# next file
+		i=$(($i+1))
+	elif [[ $command == "none" ]]; then
+		echo "Error - wrong command or filename '$arg'"
+		exit 1
+	fi
+done
+
+
+# pass file(s) logs to 2D array
+if [[ -n $files ]]; then
+	
+	# files loop
+	for file in ${files[@]}; do
+		i=0
+		
+		# unzip .gz files
+		if [[ $file =~ '.gz' ]]; then
+			gunzip $file
+			file=${file%.gz}
+			unzip=true
+		fi
+		
+		#line loop
+		while read line; do
+			j=0
+			
+			# character loop
+			for (( x=0; x<${#line}; x++ )); do
+				if [[ ${line:$x:1} == ';' ]]; then
+					j=$(($j+1))
+					continue;
+				fi
+				# pass logs
+				logs[$i,$j]=${logs[$i,$j]}${line:$x:1}
+			done
+			
+			i=$(($i+1))
+		done < $file
+		rows=$(($rows+$i))
+		
+		# data is stored, zip back
+		if [[ $unzip == true ]]; then
+			gzip $file
+		fi
+		
+	done
+	
+# no files -> read from stdin & pass
+else 
+	i=0
+	
+	# stdin loop
+	while read line; do	
+		if [[ $line == EOF ]]; then
+			break;
+		fi
+		j=0
+			
+		# character loop
+		for (( x=0; x<${#line}; x++ )); do
+			if [[ ${line:$x:1} == ';' ]]; then
+				j=$(($j+1))
+				continue;
+			fi
+			# pass logs
+			logs[$i,$j]=${logs[$i,$j]}${line:$x:1}
+		done
+		i=$(($i+1))
+	done
+	rows=$i
+fi
+
+
+# cut logs array based on filter/s
+
+for (( i=0; i<$rows; i++ )); do
+	logDate=$(date --date="${logs[$i,0]}" +%s)
+	
+	# -a 
+	let "aDiff=$logDate-$datetime_after"
+	
+	# -b
+	let "bDiff=$datetime_before-$logDate"
+	
+	# -t
+	match=true
+	if [[ -n $tickers ]]; then
+		match=false
+		for ticker in ${tickers[@]}; do
+			if [[ ${logs[$i,1]} == $ticker ]]; then
+				match=true
+			fi
+		done
+	fi
+	
+	# remove filtered items
+	if [[ $adiff -lt 0 || $bDiff -gt 0 || $match == false ]]; then
+	
+		# debug echo "deleted" ${logs[$i,0]} ${logs[$i,1]} ${logs[$i,2]} ${logs[$i,3]} ${logs[$i,4]} ${logs[$i,5]} ${logs[$i,6]}
+		for (( j=0; j<=9; j++ )); do
+			logs[$i,$j]=${logs[$(($rows-1)),$j]}
+			unset logs[$(($rows-1)),$j]
+		done
+		i=$(($i-1))
+		rows=$(($rows-1))
+	fi
+done
+
+
+# updating last-price & ticker transactions
+for (( i=0; i<$rows; i++ )); do
+	match=false
+	matchCount=1
+	if [[ $i -gt 0 ]]; then
+		x=$i
+		iLogDate=$(date --date="${logs[$i,0]}" +%s)
+		while ! [[ $x == 0 ]]
+		do
+			x=$(($x-1))
+			if [[ ${logs[$i,1]} == ${logs[$x,1]} ]]; then
+				match=true
+				matchCount=$(($matchCount+1))
+				xLogDate=$(date --date="${logs[$x,0]}" +%s)
+				let "diff=$xLogDate-$iLogDate"
+				if [[ $diff -lt 0 ]]; then
+					logs[$x,7]=${logs[$i,3]}
+				else
+					logs[$x,7]=${logs[$x,3]}
+				fi
+			fi
+		done
+		if [[ $match=false ]]; then
+			logs[$i,7]=${logs[$i,3]}
+		fi
+	else
+		logs[$i,7]=${logs[$i,3]}
+	fi
+	logs[$i,9]=$matchCount
+done
+
+if ! [[ $command == "none" ]]; then
+	profit=0
+	for (( i=0; i<$rows; i++ )); do
+		
+		# find matching tickers in previous logs
+		match=false
+		if [[ $i -gt 0 ]]; then
+			x=$i
+			while ! [[ $x == 0 ]]
+			do
+				x=$(($x-1))
+				if [[ ${logs[$i,1]} == ${logs[$x,1]} ]]; then
+					match=true
+					break;
+				fi
+			done
+		fi
+		
+		# get stock_price*amount for pos and profit
+		if [[ ${logs[$i,2]} == "sell" ]]; then
+			profit=$(echo "$profit+${logs[$i,3]}*${logs[$i,5]}" | bc)
+			logs[$i,8]=$(echo "1-${logs[$i,5]}*${logs[$i,7]}" | bc)
+		else
+			profit=$(echo "$profit-(${logs[$i,3]}*${logs[$i,5]})" | bc)
+			logs[$i,8]=$(echo "${logs[$i,5]}*${logs[$i,7]}" | bc)
+		fi
+		
+		# remove matching tickers and update pos
+		if [[ $match == true ]]; then
+			logs[$x,8]=$(echo "${logs[$x,8]}+${logs[$i,8]}" | bc)
+			if [[ ${logs[$x,9]} -lt ${logs[$i,9]} ]]; then
+				logs[$x,9]=${logs[$i,9]}
+			fi
+			for (( j=0; j<=9; j++ )); do
+				logs[$i,$j]=${logs[$(($rows-1)),$j]}
+				unset logs[$(($rows-1)),$j]
+			done
+			i=$(($i-1))
+			rows=$(($rows-1)) 
+		fi			
+	done
+fi
+
+
+# sort alphabeticaly for most commands
+if  ! [[ $command == "none" || $command == "pos" || $command == "profit" ]]; then
+	i=0
+	while [[ $i -lt $rows ]]; do	
+	
+		# compare ticker with previous ticker ${logs[$i,1]} && -n ${logs[$(($i-1)),1]} &&
+		if [[ $i -gt 0 && ${logs[$i,1]} < ${logs[$(($i-1)),1]} ]]; then
+			
+			# exchange lines
+			for (( j=0; j<=9; j++ )); do
+				pom=${logs[$i,$j]}
+				logs[$i,$j]=${logs[$(($i-1)),$j]}
+				logs[$(($i-1)),$j]=$pom
+			done
+		
+			#decrement to check previous
+			i=$(($i-1))
+		else
+			
+			# increment if already sorted
+			i=$(($i+1))
+		fi
+	done
+	
+# sort by pos
+elif [[ $command == "pos" ]]; then
+	
+	# set interval to number of log rows
+	interval=$(($rows-1))
+	
+	# find min, place it to the bottom and decrease interval
+	while ! [[ $interval == 0 ]]; do
+	
+		# find min
+		min=0
+		x=0
+		while [[ $x -lt $interval ]]; do
+			x=$(($x+1))
+			a=${logs[$x,8]}
+			a=${a%.*}			
+			b=${logs[$min,8]}
+			b=${b%.*}	
+			if [[ $a -lt $b ]]; then
+				min=$x
+			fi
+		done
+		
+		# exchange min with last
+		for (( j=0; j<=9; j++ )); do
+			pom=${logs[$min,$j]}
+			logs[$min,$j]=${logs[$interval,$j]}
+			logs[$interval,$j]=$pom
+		done
+		
+		# decrease interval
+		interval=$(($interval-1))
+	done
+fi
+
+# max pos, last-price & ticker transactions
+maxP=0
+maxLP=0
+maxT=0
+for (( i=0; i<$rows; i++ )); do
+	
+	# max pos
+	pos=${logs[$i,8]%.*}
+	if [[ $pos -gt $maxP ]]; then
+		maxP=$pos
+	fi
+	
+	# max last-price
+	lp=${logs[$i,7]%.*}
+	if [[ $lp -gt $maxLP ]]; then
+		maxLP=$lp
+	fi
+	
+	# max ticker transactions
+	if [[ ${logs[$i,9]} -gt $maxT ]]; then
+		maxT=${logs[$i,9]}
+	fi
+done
+
+# final print
+clm=$(tput cols)
+for (( i=0; i<$rows; i++ )); do
+		case $command in
+			"none" )
+				for (( j=0; j<=6; j++ )); do
+					printf "${logs[$i,$j]}"
+					if [[ $j -lt 6 ]]; then
+						printf ";"
+					fi
+				done
+				printf '\n'
+				;;
+			"list-tick" )
+				echo ${logs[$i,1]}
+				;;
+			"last-price" )
+				printf "%-10s" "${logs[$i,1]}" 
+				printf ": "
+				printf "%$((${#maxLP}+3))s" "${logs[$i,7]}"
+				echo
+				;;
+			"pos" )
+				printf "%-10s" "${logs[$i,1]}"
+				printf ": "
+				printf "%$((${#maxP}+3))s" "${logs[$i,8]}"
+				echo
+				;;
+			"graph-pos" )
+				printf "%-10s" "${logs[$i,1]}" 
+				printf ": "
+				int=${logs[$i,8]%.*}
+				if [[ $width == 0 ]]; then
+					n=$(echo "$n/1000" | bc)
+					n=${n%.*}
+					if [[ $n -gt $clm ]]; then
+						printf "\n"
+					fi
+					if [[ $int -gt 0 ]]; then
+						for (( m=0; m<n; m++ )); do
+							printf "#"
+						done
+					else
+						for (( m=0; m>n; m++ )); do
+							printf "!"
+						done
+					fi
+				else
+					n=$(echo "$int*$width/$maxP" | bc)
+					n=${n%.*}
+					if [[ $n -gt $clm ]]; then
+						printf "\n"
+					fi
+					if [[ $n -gt 0 ]]; then
+						for (( m=0; m<n; m++ )); do
+							printf "#"
+						done
+					else
+						for (( m=0; m>n; m-- )); do
+							printf "!"
+						done
+					fi
+				fi
+				echo
+				;;
+			"hist-ord" )
+				printf "%-10s" "${logs[$i,1]}" 
+				printf ": "
+				if [[ $width == 0 ]]; then
+					n=$(echo "${logs[$i,9]}*$width/$maxT" | bc)
+					n=${n%.*}
+				else
+					n=${logs[$i,9]}
+				fi
+				if [[ $n -gt $clm ]]; then
+						printf "\n"
+				fi
+				for (( m=0; m<n; m++ )); do
+					printf "#"
+				done
+				echo
+				;;
+			"profit" )
+				echo $profit
+				exit 0
+				;;
+		esac
+done
+
+
+if [[ $rows == 0 && $command == "profit" ]]; then
+	echo "0.00"
+fi
